@@ -3,7 +3,7 @@ WITH
   /* ============================================================
     1. MASTER DATA JOIN
     Distributor × Product (filter distri brand sesuai mapping)
-  ============================================================= */
+  ============================================================ */
   distri_product AS (
       SELECT
         d.region,
@@ -43,13 +43,17 @@ WITH
       -- Aggregate ST per bulan
   monthly_summary AS (
       SELECT
-        UPPER(sti.distributor_name) AS distributor_name,
+        CASE --- Request penyesuaian historikal sales distri lama ke baru
+          WHEN UPPER(sti.distributor_name) = 'PT OMEGA SUKSES ABADI' THEN 'PT TRIKARSA RAYA MANDIRI'
+          WHEN UPPER(sti.distributor_name) = 'PT OMEGA SURYA ANUGRAH' THEN 'PT KARYAINDO PUTRA KENCANA'
+          ELSE UPPER(sti.distributor_name) 
+        END AS distributor_name,
         UPPER(sti.product_id) AS item_id,
         sti.brand AS brand_of,
         DATE_TRUNC(sti.calendar_date, MONTH) AS month,
         SUM(sti.quantity) AS monthly_st
       FROM `pbi_gt_dataset.fact_sell_through_all` sti
-      WHERE sti.calendar_date BETWEEN '2025-06-01' AND '2025-08-31' -- L3M Loncat 1 bulan kebelakang lagi karena belom closing
+      WHERE sti.calendar_date BETWEEN '2025-07-01' AND '2025-09-30' -- L3M Loncat 1 bulan kebelakang lagi karena belom closing
       GROUP BY
         distributor_name,
         item_id,
@@ -122,7 +126,7 @@ WITH
             DATE_TRUNC(sti.calendar_date, MONTH) AS month,
             SUM(sti.quantity)           AS monthly_st
           FROM `pbi_gt_dataset.fact_sell_through_all` sti
-          WHERE sti.calendar_date BETWEEN '2025-03-01' AND '2025-05-31'
+          WHERE sti.calendar_date BETWEEN '2025-04-01' AND '2025-06-30'
           GROUP BY distributor_name, item_id, brand_of, month
       )
       GROUP BY distributor_name, item_id, brand_of
@@ -138,8 +142,8 @@ WITH
         COALESCE(l3.brand_of, l6.brand_of)                 AS brand_of,
         CASE
           WHEN l3.max_l3m_st_qty IS NULL OR l3.max_l3m_st_qty = 0
-              THEN l6.max_l6m_st_qty
-          ELSE l3.max_l3m_st_qty
+              THEN GREATEST(l6.max_l6m_st_qty, 0)
+          ELSE GREATEST(l3.max_l3m_st_qty, 0)
         END AS last_month_st_qty --Max L3M loncat 3 bulan (6 bulan kebbelakang), despite of the name
       FROM max_l3m_st l3
       FULL OUTER JOIN max_L6M_ish_st l6
@@ -324,11 +328,77 @@ WITH
 
 
 
+  /* ============================================================
+    8. REDUCTION OF CURRENT STOCK WITH SALES FROM THE STOCK DATE TO MTD
+  ============================================================ */
 
+
+
+  -- 1) Tanggal stok terakhir per distributor
+  last_stock_date AS (
+    SELECT
+      TRIM(UPPER(sa.distributor)) AS distributor,
+      MAX(PARSE_DATE('%Y-%m-%d', sa.date)) AS last_stock_date
+    FROM gt_schema.gt_raw_data_stock sa
+    WHERE sa.date IS NOT NULL
+      AND UPPER(sa.tagging) = 'CURRENT STOCK'
+    GROUP BY TRIM(UPPER(sa.distributor))
+  ),
+
+
+  -- 2) Tanggal stok terakhir nasional (semua distributor) - (buat dipake kalo ada stock yang ga bertanggal)
+  national_last_stock_date AS (
+    SELECT
+      MAX(PARSE_DATE('%Y-%m-%d', sa.date)) AS national_last_stock_date
+    FROM gt_schema.gt_raw_data_stock sa
+    WHERE sa.date IS NOT NULL
+      AND UPPER(sa.tagging) = 'CURRENT STOCK'
+  ),
+
+
+  --3) Selisih Sell Through between stock date & MTD
+  sold_since_stock_date AS (
+    SELECT 
+      b.distributor,
+      b.sku,
+      COALESCE(s.last_stock_date, n.national_last_stock_date) AS used_stock_date,
+      SUM(t.quantity) AS st_since_stock_date
+    FROM target_remaining b
+    LEFT JOIN last_stock_date s
+      ON UPPER(b.distributor) = UPPER(s.distributor)
+    LEFT JOIN national_last_stock_date n
+      ON TRUE
+    LEFT JOIN `pbi_gt_dataset.fact_sell_through_all` t
+      ON TRIM(UPPER(b.distributor)) = TRIM(UPPER(t.distributor_name))
+      AND TRIM(UPPER(b.sku)) = TRIM(UPPER(t.product_id))
+      AND t.calendar_date > COALESCE(s.last_stock_date, n.national_last_stock_date)
+      AND t.calendar_date <= CURRENT_DATE("Asia/Jakarta")
+    WHERE b.brand = 'G2G'
+    GROUP BY 
+      b.distributor,
+      b.sku,
+      COALESCE(s.last_stock_date, n.national_last_stock_date)
+  ),
+
+  --4) Pengurangan current stock dengan st since stock date - MTD
+  g2g_stock_adjust AS (
+    SELECT
+      tr.* EXCEPT (current_stock_qty, current_stock_value),
+      tr.current_stock_qty - COALESCE(ss.st_since_stock_date, 0) AS current_stock_qty,
+      (tr.current_stock_qty - COALESCE(ss.st_since_stock_date, 0)) * tr.price_for_distri AS current_stock_value,
+      tr.current_stock_qty AS ori_current_stock_qty,
+      tr.current_stock_value AS ori_current_stock_value,
+      ss.st_since_stock_date,
+      ss.used_stock_date
+    FROM target_remaining tr
+    LEFT JOIN sold_since_stock_date ss
+      ON TRIM(UPPER(tr.distributor)) = TRIM(UPPER(ss.distributor))
+      AND TRIM(UPPER(tr.sku)) = TRIM(UPPER(ss.sku))
+  ),
 
 
   /* ============================================================
-    8. BUFFER PLAN AWAL (QTY) -- biar SKU healty--
+    9. BUFFER PLAN AWAL (QTY) -- biar SKU healty--
   ============================================================ */
   buffer_data AS (
       SELECT
@@ -363,42 +433,18 @@ WITH
           WHEN avg_weekly_st_lm_qty * woi_standard - GREATEST(total_stock,0) > 0
             THEN CEIL((avg_weekly_st_lm_qty * woi_standard) - GREATEST(total_stock,0))
         END, 0) AS buffer_plan_by_lm_qty
-      FROM target_remaining tdj
+      FROM g2g_stock_adjust tdj
   ),
-
-
 
 
 
 
   /* ============================================================
-    . ADJUSTMENT BUFFER REMAINING DAYS UNTIL CLOSING OF THE MONTH
+    10. ADJUSTMENT BUFFER REMAINING DAYS UNTIL CLOSING OF THE MONTH
   ============================================================ */
 
 
-  -- 1) Tanggal stok terakhir per distributor
-  last_stock_date AS (
-    SELECT
-      TRIM(UPPER(sa.distributor)) AS distributor,
-      MAX(PARSE_DATE('%Y-%m-%d', sa.date)) AS last_stock_date
-    FROM gt_schema.gt_raw_data_stock sa
-    WHERE sa.date IS NOT NULL
-      AND UPPER(sa.tagging) = 'CURRENT STOCK'
-    GROUP BY TRIM(UPPER(sa.distributor))
-  ),
-
-
-  -- 2) Tanggal stok terakhir nasional (semua distributor)
-  national_last_stock_date AS (
-    SELECT
-      MAX(PARSE_DATE('%Y-%m-%d', sa.date)) AS national_last_stock_date
-    FROM gt_schema.gt_raw_data_stock sa
-    WHERE sa.date IS NOT NULL
-      AND UPPER(sa.tagging) = 'CURRENT STOCK'
-  ),
-
-
-  -- 3) Kalkulasi proyeksi & kebutuhan tambahan
+  -- 1) Kalkulasi proyeksi & kebutuhan tambahan
   buffer_gap_calc AS (
     SELECT
       b.*,
@@ -464,7 +510,7 @@ WITH
   ),
 
 
-  -- 4) Final buffer LM
+  -- 2) Final buffer LM
   buffer_gap_adj AS (
     SELECT
       bg.* EXCEPT(
@@ -501,7 +547,7 @@ WITH
 
 
   /* ============================================================
-    9. ADJUSTMENT BUFFER INGREDIENT
+    11. ADJUSTMENT BUFFER INGREDIENT
   ============================================================ */
   -- Buffer val awal
   buffer_val AS (
@@ -543,14 +589,11 @@ WITH
 
 
   /* ============================================================
-    10. ADJUSTMENT BUFFER PLAN WITH TARGET SI (VALUE, NOT FINAL with Headroom)
+    12. ADJUSTMENT BUFFER PLAN WITH TARGET SI (VALUE, NOT FINAL with Headroom)
   ============================================================ */
   headroom AS (
       SELECT
         h.*,
-
-
-
 
         -- Headroom maksimal tambahan VALUE per SKU
         CASE
@@ -705,7 +748,7 @@ WITH
 
 
   /* ============================================================
-    11. NPD ALLOCATION (overwrite buffer_plan_by_lm_qty_adj) & Buffer Value
+    13. NPD ALLOCATION (overwrite buffer_plan_by_lm_qty_adj) & Buffer Value
   ============================================================ */
   contrib AS (
     SELECT
@@ -746,7 +789,7 @@ WITH
       ON a.region = c.region
     JOIN contrib_region cr
       ON a.region = cr.region
-    WHERE DATE_TRUNC(a.calendar_date, MONTH) = DATE '2025-09-01'
+    WHERE DATE_TRUNC(a.calendar_date, MONTH) = DATE '2025-10-01'
   ),
 
 
@@ -842,16 +885,13 @@ WITH
           ),
           0
         ) AS woi_after_buffer_plan_by_lm,
-        CASE WHEN npa.buffer_plan_by_am_l3m_qty_adj = 0 THEN 0
-        ELSE
-          COALESCE(
-            SAFE_DIVIDE(
-              npa.total_stock + npa.buffer_plan_by_lm_qty_adj - npa.expected_consumption_to_month_end,
-              NULLIF(npa.avg_weekly_st_lm_qty, 0)
-            ),
-            0
-          )END AS woi_end_of_month_by_lm
-   
+        COALESCE(
+          SAFE_DIVIDE(
+            npa.total_stock + npa.buffer_plan_by_lm_qty_adj - npa.expected_consumption_to_month_end,
+            NULLIF(npa.avg_weekly_st_lm_qty, 0)
+          ),
+          0
+        ) AS woi_end_of_month_by_lm
       FROM npd_allocation_adj npa
   ),
 
@@ -861,7 +901,7 @@ WITH
 
 
   /* ============================================================
-    12. ST POTENTIAL
+    13. ST POTENTIAL
   ============================================================ */
   -- ST Potential Qty
   st_potential_data AS (
@@ -906,9 +946,6 @@ WITH
   /* ============================================================
     FINAL OUTPUT
   ============================================================ */
-      /* ============================================================
-        FINAL OUTPUT
-      ============================================================ */
       SELECT
         region,
         distributor_company,
@@ -934,6 +971,10 @@ WITH
         avg_weekly_st_am_l3m_val,
         avg_weekly_st_lm_qty,
         avg_weekly_st_lm_val,
+        ori_current_stock_qty,
+        ori_current_stock_value,
+        st_since_stock_date,
+        used_stock_date,
         current_stock_qty,
         current_stock_value,
         in_transit_stock_qty,
