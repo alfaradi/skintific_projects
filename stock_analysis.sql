@@ -356,45 +356,42 @@ WITH
   ),
 
 
-  --3) Selisih Sell Through between stock date & MTD
-  sold_since_stock_date AS (
-    SELECT 
-      b.distributor,
-      b.sku,
-      COALESCE(s.last_stock_date, n.national_last_stock_date) AS used_stock_date,
-      SUM(t.quantity) AS st_since_stock_date
-    FROM target_remaining b
-    LEFT JOIN last_stock_date s
-      ON UPPER(b.distributor) = UPPER(s.distributor)
-    LEFT JOIN national_last_stock_date n
-      ON TRUE
-    LEFT JOIN `pbi_gt_dataset.fact_sell_through_all` t
-      ON TRIM(UPPER(b.distributor)) = TRIM(UPPER(t.distributor_name))
-      AND TRIM(UPPER(b.sku)) = TRIM(UPPER(t.product_id))
-      AND t.calendar_date > COALESCE(s.last_stock_date, n.national_last_stock_date)
-      AND t.calendar_date <= CURRENT_DATE("Asia/Jakarta")
-    WHERE b.brand = 'G2G'
-    GROUP BY 
-      b.distributor,
-      b.sku,
-      COALESCE(s.last_stock_date, n.national_last_stock_date)
-  ),
+-- 3) Agregasi Sell-Through - G2G untuk pengurangan
+st_since_last_stock AS (
+  SELECT
+    TRIM(UPPER(t.distributor_name)) AS distributor,
+    TRIM(UPPER(t.product_id)) AS sku,
+    SUM(t.quantity) AS st_since_stock_date
+  FROM `pbi_gt_dataset.fact_sell_through_all` t
+  JOIN last_stock_date s
+    ON TRIM(UPPER(t.distributor_name)) = s.distributor
+  WHERE
+    t.calendar_date > s.last_stock_date
+    AND t.calendar_date <= CURRENT_DATE("Asia/Jakarta")
+    AND t.brand = 'G2G'
+  GROUP BY
+    distributor,
+    sku
+),
 
-  --4) Pengurangan current stock dengan st since stock date - MTD
-  g2g_stock_adjust AS (
-    SELECT
-      tr.* EXCEPT (current_stock_qty, current_stock_value),
-      tr.current_stock_qty - COALESCE(ss.st_since_stock_date, 0) AS current_stock_qty,
-      (tr.current_stock_qty - COALESCE(ss.st_since_stock_date, 0)) * tr.price_for_distri AS current_stock_value,
-      tr.current_stock_qty AS ori_current_stock_qty,
-      tr.current_stock_value AS ori_current_stock_value,
-      ss.st_since_stock_date,
-      ss.used_stock_date
-    FROM target_remaining tr
-    LEFT JOIN sold_since_stock_date ss
-      ON TRIM(UPPER(tr.distributor)) = TRIM(UPPER(ss.distributor))
-      AND TRIM(UPPER(tr.sku)) = TRIM(UPPER(ss.sku))
-  ),
+-- 4) Gabungkan hasil agregasi ke data utama
+g2g_stock_adjust AS (
+  SELECT
+    tr.* EXCEPT (current_stock_qty, current_stock_value),
+    tr.current_stock_qty - COALESCE(ss.st_since_stock_date, 0) AS current_stock_qty,
+    (tr.current_stock_qty - COALESCE(ss.st_since_stock_date, 0)) * tr.price_for_distri AS current_stock_value,
+    tr.current_stock_qty AS ori_current_stock_qty,
+    tr.current_stock_value AS ori_current_stock_value,
+    COALESCE(ss.st_since_stock_date, 0) AS st_since_stock_date,
+    COALESCE(lsd.last_stock_date, nlsd.national_last_stock_date) AS used_stock_date
+  FROM target_remaining tr
+  LEFT JOIN st_since_last_stock ss
+    ON TRIM(UPPER(tr.distributor)) = ss.distributor
+    AND TRIM(UPPER(tr.sku)) = ss.sku
+  LEFT JOIN last_stock_date lsd
+    ON TRIM(UPPER(tr.distributor)) = lsd.distributor
+  LEFT JOIN national_last_stock_date nlsd ON TRUE
+),
 
 
   /* ============================================================
@@ -403,8 +400,6 @@ WITH
   buffer_data AS (
       SELECT
         tdj.*,
-
-
 
 
         -- Versi AM L3M
@@ -1001,4 +996,4 @@ WITH
         region,
         distributor_company,
         distributor,
-        sku;
+        sku
