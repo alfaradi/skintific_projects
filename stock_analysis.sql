@@ -593,14 +593,14 @@ g2g_stock_adjust AS (
         -- Headroom maksimal tambahan VALUE per SKU
         CASE
             WHEN h.buffer_plan_by_am_l3m_val > 0
-            AND h.assortment IN ('Must Have','Best Selling')
+            AND h.assortment IN ('Must Have SKU','Best Selling SKU')
             THEN GREATEST((h.woi_standard+2) * h.avg_weekly_st_am_l3m_qty * h.price_for_distri
                           - h.buffer_plan_by_am_l3m_val, 0)
             ELSE 0
           END AS headroom_am,
         CASE
             WHEN h.buffer_plan_by_lm_val > 0
-            AND h.assortment IN ('Must Have','Best Selling')
+            AND h.assortment IN ('Must Have SKU','Best Selling SKU')
             THEN GREATEST((h.woi_standard+2) * h.avg_weekly_st_lm_qty * h.price_for_distri
                           - h.buffer_plan_by_lm_val, 0)
             ELSE 0
@@ -643,9 +643,10 @@ g2g_stock_adjust AS (
               LEAST(
                 COALESCE(
                   SAFE_DIVIDE(
-                    h.avg_weekly_st_am_l3m_qty * (hs.target_remaining - hs.total_buffer_am_val),
-                    SUM(CASE WHEN h.headroom_am > 0 THEN h.avg_weekly_st_am_l3m_qty ELSE 0 END)
-                      OVER(PARTITION BY h.distributor, h.brand)
+                    GREATEST(
+                      h.avg_weekly_st_am_l3m_qty * (hs.target_remaining - hs.total_buffer_am_val),0),
+                      SUM(CASE WHEN h.headroom_am > 0 THEN h.avg_weekly_st_am_l3m_qty ELSE 0 END)
+                        OVER(PARTITION BY h.distributor, h.brand)
                   ), 0
                 ),
                 h.headroom_am
@@ -666,7 +667,8 @@ g2g_stock_adjust AS (
               LEAST(
                 COALESCE(
                   SAFE_DIVIDE(
-                    h.avg_weekly_st_lm_qty * (hs.target_remaining - hs.total_buffer_lm_val),
+                    GREATEST(
+                    h.avg_weekly_st_lm_qty * (hs.target_remaining - hs.total_buffer_lm_val),0),
                     SUM(CASE WHEN h.headroom_lm > 0 THEN h.avg_weekly_st_lm_qty ELSE 0 END)
                       OVER(PARTITION BY h.distributor, h.brand)
                   ), 0
