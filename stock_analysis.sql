@@ -193,7 +193,7 @@ WITH
         dp.assortment,
         dp.moq,
         dp.inner_pcs,
-        os.lifecycle_status,
+        COALESCE(os.lifecycle_status, 'UNAVAILABLE') AS lifecycle_status,
         os.supply_control_status_gt,
         dp.price_for_distri,
         dp.price_for_store,
