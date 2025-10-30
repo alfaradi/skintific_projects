@@ -28,6 +28,8 @@ WITH
           (REGEXP_CONTAINS(UPPER(d.brand), r'G2G') AND UPPER(p.brand) = 'G2G') OR
           (REGEXP_CONTAINS(UPPER(d.brand), r'SKT') AND UPPER(p.brand) = 'SKINTIFIC') OR
           (REGEXP_CONTAINS(UPPER(d.brand), r'TPH') AND UPPER(p.brand) = 'TIMEPHORIA')
+          (REGEXP_CONTAINS(UPPER(d.brand), r'FR') AND UPPER(p.brand) = 'FACERINNA') OR
+          (REGEXP_CONTAINS(UPPER(d.brand), r'BB') AND UPPER(p.brand) = 'BODIBREZE')
         )
       GROUP BY ALL
   ),
