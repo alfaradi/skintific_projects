@@ -591,20 +591,43 @@ g2g_stock_adjust AS (
         h.*,
 
         -- Headroom maksimal tambahan VALUE per SKU
-        CASE
-            WHEN h.buffer_plan_by_am_l3m_val > 0
-            AND h.assortment IN ('Must Have SKU','Best Selling SKU')
-            THEN GREATEST((h.woi_standard+2) * h.avg_weekly_st_am_l3m_qty * h.price_for_distri
-                          - h.buffer_plan_by_am_l3m_val, 0)
-            ELSE 0
-          END AS headroom_am,
-        CASE
-            WHEN h.buffer_plan_by_lm_val > 0
-            AND h.assortment IN ('Must Have SKU','Best Selling SKU')
-            THEN GREATEST((h.woi_standard+2) * h.avg_weekly_st_lm_qty * h.price_for_distri
-                          - h.buffer_plan_by_lm_val, 0)
-            ELSE 0
-          END AS headroom_lm,
+        -- Khusus buat SKU Must Have & Best Selling
+        -- CASE
+        --   WHEN h.assortment IN ('Must Have SKU','Best Selling SKU')
+        --   THEN GREATEST(
+        --         ((h.woi_standard + 2 - h.current_woi_by_lm) 
+        --         * h.avg_weekly_st_am_l3m_qty * h.price_for_distri)
+        --         - COALESCE(h.buffer_plan_by_am_l3m_val, 0),
+        --         0
+        --       )
+        --   ELSE 0
+        -- END AS headroom_am,
+        -- CASE
+        --   WHEN h.assortment IN ('Must Have SKU','Best Selling SKU')
+        --   THEN GREATEST(
+        --         ((h.woi_standard + 2 - h.current_woi_by_lm) 
+        --         * h.avg_weekly_st_lm_qty * h.price_for_distri)
+        --         - COALESCE(h.buffer_plan_by_lm_val, 0),
+        --         0
+        --       )
+        --   ELSE 0
+        -- END AS headroom_lm
+
+
+        -- Headroom buat seluruh SKU
+        GREATEST(
+          ((h.woi_standard + 2 - h.current_woi_by_lm) 
+          * h.avg_weekly_st_am_l3m_qty * h.price_for_distri)
+          - COALESCE(h.buffer_plan_by_am_l3m_val, 0),
+          0
+        ) AS headroom_am,
+
+        GREATEST(
+          ((h.woi_standard + 2 - h.current_woi_by_lm) 
+          * h.avg_weekly_st_lm_qty * h.price_for_distri)
+          - COALESCE(h.buffer_plan_by_lm_val, 0),
+          0
+        ) AS headroom_lm
       FROM buffer_val h
   ),
 
@@ -797,7 +820,23 @@ g2g_stock_adjust AS (
       distributor_name,
       brand,
       sku,
-      SUM(COALESCE(order_qty, 0)) AS order_qty
+      SUM(
+        CASE
+            -- Condition 1: Include ONLY Oct 28-31 quantity for the specific SKUs
+            WHEN
+                sku IN ('G2G-2111', 'G2G-2112', 'G2G-2113', 'G2G-2114')
+                AND order_date BETWEEN DATE('2025-10-28') AND DATE('2025-10-31')
+            THEN COALESCE(order_qty, 0)
+
+            -- Condition 2: Include ALL quantity for ALL other SKUs
+            WHEN
+                sku NOT IN ('G2G-2111', 'G2G-2112', 'G2G-2113', 'G2G-2114')
+            THEN COALESCE(order_qty, 0)
+
+            -- Everything else (which is the specific SKUs outside Oct 28-31) gets zeroed out
+            ELSE 0
+        END
+      ) AS order_qty
     FROM dms.gt_po_tracking_mtd_mv
     GROUP BY distributor_name, brand, sku
   ),
@@ -810,7 +849,23 @@ g2g_stock_adjust AS (
       region,
       brand,
       sku,
-      SUM(COALESCE(order_qty, 0)) AS order_qty_region
+      SUM(
+        CASE
+            -- Condition 1: Include ONLY Oct 28-31 quantity for the specific SKUs
+            WHEN
+                sku IN ('G2G-2111', 'G2G-2112', 'G2G-2113', 'G2G-2114')
+                AND order_date BETWEEN DATE('2025-10-28') AND DATE('2025-10-31')
+            THEN COALESCE(order_qty, 0)
+
+            -- Condition 2: Include ALL quantity for ALL other SKUs
+            WHEN
+                sku NOT IN ('G2G-2111', 'G2G-2112', 'G2G-2113', 'G2G-2114')
+            THEN COALESCE(order_qty, 0)
+
+            -- Everything else (which is the specific SKUs outside Oct 28-31) gets zeroed out
+            ELSE 0
+        END
+      ) AS order_qty_region
     FROM dms.gt_po_tracking_mtd_mv
     GROUP BY region, brand, sku
   ),    
