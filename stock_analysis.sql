@@ -1,4 +1,4 @@
-
+ 
 WITH
   /* ============================================================
     1. MASTER DATA JOIN
@@ -27,7 +27,7 @@ WITH
         AND (
           (REGEXP_CONTAINS(UPPER(d.brand), r'G2G') AND UPPER(p.brand) = 'G2G') OR
           (REGEXP_CONTAINS(UPPER(d.brand), r'SKT') AND UPPER(p.brand) = 'SKINTIFIC') OR
-          (REGEXP_CONTAINS(UPPER(d.brand), r'TPH') AND UPPER(p.brand) = 'TIMEPHORIA')
+          (REGEXP_CONTAINS(UPPER(d.brand), r'TPH') AND UPPER(p.brand) = 'TIMEPHORIA') OR
           (REGEXP_CONTAINS(UPPER(d.brand), r'FR') AND UPPER(p.brand) = 'FACERINNA') OR
           (REGEXP_CONTAINS(UPPER(d.brand), r'BB') AND UPPER(p.brand) = 'BODIBREZE')
         )
@@ -55,7 +55,7 @@ WITH
         DATE_TRUNC(sti.calendar_date, MONTH) AS month,
         SUM(sti.quantity) AS monthly_st
       FROM `pbi_gt_dataset.fact_sell_through_all` sti
-      WHERE sti.calendar_date BETWEEN '2025-07-01' AND '2025-09-30' -- L3M Loncat 1 bulan kebelakang lagi karena belom closing
+      WHERE sti.calendar_date BETWEEN '2025-08-01' AND '2025-10-31' -- L3M Loncat 1 bulan kebelakang lagi karena belom closing
       GROUP BY
         distributor_name,
         item_id,
@@ -128,7 +128,7 @@ WITH
             DATE_TRUNC(sti.calendar_date, MONTH) AS month,
             SUM(sti.quantity)           AS monthly_st
           FROM `pbi_gt_dataset.fact_sell_through_all` sti
-          WHERE sti.calendar_date BETWEEN '2025-04-01' AND '2025-06-30'
+          WHERE sti.calendar_date BETWEEN '2025-05-01' AND '2025-07-31'
           GROUP BY distributor_name, item_id, brand_of, month
       )
       GROUP BY distributor_name, item_id, brand_of
@@ -195,8 +195,8 @@ WITH
         dp.assortment,
         dp.moq,
         dp.inner_pcs,
-        COALESCE(os.lifecycle_status, 'UNAVAILABLE') AS lifecycle_status,
-        os.supply_control_status_gt,
+        os.lifecycle_status,
+        COALESCE(os.supply_control_status_gt, 'UNAVAILABLE') AS supply_control_status_gt,
         dp.price_for_distri,
         dp.price_for_store,
         COALESCE(sist.total_l3m_st_qty, 0) AS total_l3m_st_qty,
@@ -280,9 +280,9 @@ WITH
       WHERE UPPER(type_subject) = 'SELL IN'
         AND DATE_TRUNC(CAST(calendar_date AS DATE), MONTH) =
               /*dynamic_date*/
-        DATE_TRUNC(CURRENT_DATE(), MONTH) -- Current month
+        -- DATE_TRUNC(CURRENT_DATE(), MONTH) -- Current month
               /*backdate*/
-        -- DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH), MONTH) -- Last month
+        DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH), MONTH) -- Last month
   ),
 
 
@@ -445,62 +445,52 @@ g2g_stock_adjust AS (
   buffer_gap_calc AS (
     SELECT
       b.*,
-
-
-      -- fallback: kalau last_stock_date null → pakai nasional
+      -- fallback tanggal
       COALESCE(lsd.last_stock_date, n.national_last_stock_date) AS last_stock_date,
 
-
-      -- sisa hari
+      -- sisa hari hingga akhir bulan berjalan (bukan bulan stok)
       GREATEST(
         DATE_DIFF(
-          LAST_DAY(COALESCE(lsd.last_stock_date, n.national_last_stock_date)),
+          LAST_DAY(CURRENT_DATE("Asia/Jakarta")),
           COALESCE(lsd.last_stock_date, n.national_last_stock_date),
           DAY
         ), 0
       ) AS days_remaining,
 
-
-      -- avg harian (asumsi 30 hari)
+      -- avg harian (30 hari asumsi)
       SAFE_DIVIDE(b.last_month_st_qty, 30) AS avg_daily_st_lm_qty,
 
-
       -- perkiraan konsumsi s/d akhir bulan
-      CEIL(
-        SAFE_DIVIDE(b.last_month_st_qty, 30) *
+      CEIL(SAFE_DIVIDE(b.last_month_st_qty, 30) *
         GREATEST(
           DATE_DIFF(
-            LAST_DAY(COALESCE(lsd.last_stock_date, n.national_last_stock_date)),
+            LAST_DAY(CURRENT_DATE("Asia/Jakarta")),
             COALESCE(lsd.last_stock_date, n.national_last_stock_date),
             DAY
           ), 0
         )
       ) AS expected_consumption_to_month_end,
 
-
       -- stok proyeksi akhir bulan
       (COALESCE(s.total_stock, 0) -
-      CEIL(
-        SAFE_DIVIDE(b.last_month_st_qty, 30) *
-        GREATEST(
-          DATE_DIFF(
-            LAST_DAY(COALESCE(lsd.last_stock_date, n.national_last_stock_date)),
-            COALESCE(lsd.last_stock_date, n.national_last_stock_date),
-            DAY
-          ), 0
+        CEIL(SAFE_DIVIDE(b.last_month_st_qty, 30) *
+          GREATEST(
+            DATE_DIFF(
+              LAST_DAY(CURRENT_DATE("Asia/Jakarta")),
+              COALESCE(lsd.last_stock_date, n.national_last_stock_date),
+              DAY
+            ), 0
+          )
         )
-      )
       ) AS projected_stock_end,
 
-
-      -- kebutuhan woi
+      -- kebutuhan WOI
       COALESCE(b.avg_weekly_st_lm_qty, 0) * COALESCE(b.woi_standard, 0) AS required_stock
-
 
     FROM buffer_data b
     LEFT JOIN stock_data s
       ON TRIM(UPPER(b.distributor)) = TRIM(UPPER(s.distributor))
-    AND TRIM(UPPER(b.sku)) = TRIM(UPPER(s.prod_id))
+      AND TRIM(UPPER(b.sku)) = TRIM(UPPER(s.prod_id))
     LEFT JOIN last_stock_date lsd
       ON TRIM(UPPER(b.distributor)) = TRIM(UPPER(lsd.distributor))
     CROSS JOIN national_last_stock_date n
@@ -594,42 +584,42 @@ g2g_stock_adjust AS (
 
         -- Headroom maksimal tambahan VALUE per SKU
         -- Khusus buat SKU Must Have & Best Selling
-        -- CASE
-        --   WHEN h.assortment IN ('Must Have SKU','Best Selling SKU')
-        --   THEN GREATEST(
-        --         ((h.woi_standard + 2 - h.current_woi_by_lm) 
-        --         * h.avg_weekly_st_am_l3m_qty * h.price_for_distri)
-        --         - COALESCE(h.buffer_plan_by_am_l3m_val, 0),
-        --         0
-        --       )
-        --   ELSE 0
-        -- END AS headroom_am,
-        -- CASE
-        --   WHEN h.assortment IN ('Must Have SKU','Best Selling SKU')
-        --   THEN GREATEST(
-        --         ((h.woi_standard + 2 - h.current_woi_by_lm) 
-        --         * h.avg_weekly_st_lm_qty * h.price_for_distri)
-        --         - COALESCE(h.buffer_plan_by_lm_val, 0),
-        --         0
-        --       )
-        --   ELSE 0
-        -- END AS headroom_lm
+        CASE
+          WHEN h.assortment IN ('Must Have SKU','Best Selling SKU')
+          THEN GREATEST(
+                ((h.woi_standard + 2 - h.current_woi_by_lm) 
+                * h.avg_weekly_st_am_l3m_qty * h.price_for_distri)
+                - COALESCE(h.buffer_plan_by_am_l3m_val, 0),
+                0
+              )
+          ELSE 0
+        END AS headroom_am,
+        CASE
+          WHEN h.assortment IN ('Must Have SKU','Best Selling SKU')
+          THEN GREATEST(
+                ((h.woi_standard + 2 - h.current_woi_by_lm) 
+                * h.avg_weekly_st_lm_qty * h.price_for_distri)
+                - COALESCE(h.buffer_plan_by_lm_val, 0),
+                0
+              )
+          ELSE 0
+        END AS headroom_lm
 
 
         -- Headroom buat seluruh SKU
-        GREATEST(
-          ((h.woi_standard + 2 - h.current_woi_by_lm) 
-          * h.avg_weekly_st_am_l3m_qty * h.price_for_distri)
-          - COALESCE(h.buffer_plan_by_am_l3m_val, 0),
-          0
-        ) AS headroom_am,
+        -- GREATEST(
+        --   ((h.woi_standard + 2 - h.current_woi_by_lm) 
+        --   * h.avg_weekly_st_am_l3m_qty * h.price_for_distri)
+        --   - COALESCE(h.buffer_plan_by_am_l3m_val, 0),
+        --   0
+        -- ) AS headroom_am,
 
-        GREATEST(
-          ((h.woi_standard + 2 - h.current_woi_by_lm) 
-          * h.avg_weekly_st_lm_qty * h.price_for_distri)
-          - COALESCE(h.buffer_plan_by_lm_val, 0),
-          0
-        ) AS headroom_lm
+        -- GREATEST(
+        --   ((h.woi_standard + 2 - h.current_woi_by_lm) 
+        --   * h.avg_weekly_st_lm_qty * h.price_for_distri)
+        --   - COALESCE(h.buffer_plan_by_lm_val, 0),
+        --   0
+        -- ) AS headroom_lm
       FROM buffer_val h
   ),
 
@@ -811,7 +801,7 @@ g2g_stock_adjust AS (
       ON a.region = c.region
     JOIN contrib_region cr
       ON a.region = cr.region
-    WHERE DATE_TRUNC(a.calendar_date, MONTH) = DATE '2025-10-01'
+    WHERE DATE_TRUNC(a.calendar_date, MONTH) = DATE '2025-11-01'
   ),
 
 
@@ -822,23 +812,7 @@ g2g_stock_adjust AS (
       distributor_name,
       brand,
       sku,
-      SUM(
-        CASE
-            -- Condition 1: Include ONLY Oct 28-31 quantity for the specific SKUs
-            WHEN
-                sku IN ('G2G-2111', 'G2G-2112', 'G2G-2113', 'G2G-2114')
-                AND order_date BETWEEN DATE('2025-10-28') AND DATE('2025-10-31')
-            THEN COALESCE(order_qty, 0)
-
-            -- Condition 2: Include ALL quantity for ALL other SKUs
-            WHEN
-                sku NOT IN ('G2G-2111', 'G2G-2112', 'G2G-2113', 'G2G-2114')
-            THEN COALESCE(order_qty, 0)
-
-            -- Everything else (which is the specific SKUs outside Oct 28-31) gets zeroed out
-            ELSE 0
-        END
-      ) AS order_qty
+      SUM(order_qty) AS order_qty
     FROM dms.gt_po_tracking_mtd_mv
     GROUP BY distributor_name, brand, sku
   ),
@@ -851,23 +825,7 @@ g2g_stock_adjust AS (
       region,
       brand,
       sku,
-      SUM(
-        CASE
-            -- Condition 1: Include ONLY Oct 28-31 quantity for the specific SKUs
-            WHEN
-                sku IN ('G2G-2111', 'G2G-2112', 'G2G-2113', 'G2G-2114')
-                AND order_date BETWEEN DATE('2025-10-28') AND DATE('2025-10-31')
-            THEN COALESCE(order_qty, 0)
-
-            -- Condition 2: Include ALL quantity for ALL other SKUs
-            WHEN
-                sku NOT IN ('G2G-2111', 'G2G-2112', 'G2G-2113', 'G2G-2114')
-            THEN COALESCE(order_qty, 0)
-
-            -- Everything else (which is the specific SKUs outside Oct 28-31) gets zeroed out
-            ELSE 0
-        END
-      ) AS order_qty_region
+      SUM(order_qty) AS order_qty_region
     FROM dms.gt_po_tracking_mtd_mv
     GROUP BY region, brand, sku
   ),    
@@ -941,11 +899,15 @@ g2g_stock_adjust AS (
         ) AS woi_after_buffer_plan_by_lm,
         COALESCE(
           SAFE_DIVIDE(
-            npa.total_stock + npa.buffer_plan_by_lm_qty_adj - npa.expected_consumption_to_month_end,
+            GREATEST(
+              npa.total_stock + npa.buffer_plan_by_lm_qty_adj - npa.expected_consumption_to_month_end,
+              0
+            ),
             NULLIF(npa.avg_weekly_st_lm_qty, 0)
           ),
           0
         ) AS woi_end_of_month_by_lm
+
       FROM npd_allocation_adj npa
   ),
 
@@ -1055,4 +1017,4 @@ g2g_stock_adjust AS (
         region,
         distributor_company,
         distributor,
-        sku
+        sku;
