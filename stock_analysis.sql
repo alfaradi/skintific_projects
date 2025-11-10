@@ -1,4 +1,4 @@
- 
+
 WITH
   /* ============================================================
     1. MASTER DATA JOIN
@@ -203,8 +203,9 @@ WITH
         COALESCE(sist.st_active_months, 0) AS st_active_months,
         COALESCE(sist.avg_am_l3m_st_qty, 0) AS avg_am_l3m_st_qty,
         COALESCE(sist.avg_am_l3m_st_qty, 0) * dp.price_for_store AS avg_am_l3m_st_value,
-        COALESCE(lms.last_month_st_qty, 0) AS last_month_st_qty,
-        COALESCE(lms.last_month_st_qty * dp.price_for_store, 0) AS last_month_st_value,
+        -- Historical sales G2G pake AVG AM L3M
+        COALESCE(sist.avg_am_l3m_st_qty, 0) AS last_month_st_qty,-- G2G pake AVG L3M, despite of the Last Month name
+        COALESCE(sist.avg_am_l3m_st_qty * dp.price_for_store, 0) AS last_month_st_value,
         COALESCE(sd.current_stock_qty, 0) AS current_stock_qty,
         COALESCE(sd.in_transit_stock_qty, 0) AS in_transit_stock_qty,
         COALESCE(sd.total_stock, 0) AS total_stock,
@@ -1017,4 +1018,4 @@ g2g_stock_adjust AS (
         region,
         distributor_company,
         distributor,
-        sku;
+        sku
