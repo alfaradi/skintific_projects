@@ -1,0 +1,146 @@
+WITH 
+stock_date AS (
+  SELECT 
+    TRIM(UPPER(distributor)) AS distributor,
+    MAX(PARSE_DATE('%Y-%m-%d', date)) AS current_stock_date
+  FROM `gt_schema.gt_raw_data_stock`
+  WHERE UPPER(tagging) = "CURRENT STOCK"
+    AND date IS NOT NULL
+  GROUP BY TRIM(UPPER(distributor))
+),
+
+in_transit_from_it AS (
+  SELECT 
+    p.* EXCEPT(shipment_ach_time),
+    CASE 
+      WHEN p.outbound_qty IS NOT NULL AND p.outbound_qty <> 0 THEN p.outbound_qty
+      WHEN p.prepare_qty IS NOT NULL AND p.prepare_qty <> 0 THEN p.prepare_qty
+      WHEN p.delivery_notice_qty IS NOT NULL AND p.delivery_notice_qty <> 0 THEN p.delivery_notice_qty
+      ELSE p.order_qty
+    END AS in_transit_qty,
+    CAST(NULL AS DATE) AS current_stock_date,
+    'in_transit_from_it' AS source_table,
+    1 AS source_priority
+  FROM `dms.gt_in_transit_mv` p
+  WHERE UPPER(p.sales_order_type) = "GT DIRECT PURCHASE"
+),    
+
+in_transit_from_mtd AS (
+  SELECT 
+    p.*,
+    CASE 
+      WHEN p.outbound_qty IS NOT NULL AND p.outbound_qty <> 0 THEN p.outbound_qty
+      WHEN p.prepare_qty IS NOT NULL AND p.prepare_qty <> 0 THEN p.prepare_qty
+      WHEN p.delivery_notice_qty IS NOT NULL AND p.delivery_notice_qty <> 0 THEN p.delivery_notice_qty
+      ELSE p.order_qty
+    END AS in_transit_qty,
+    sd.current_stock_date,
+    'in_transit_from_mtd' AS source_table,
+    2 AS source_priority
+  FROM `dms.gt_po_tracking_mtd_mv` p
+  LEFT JOIN stock_date sd
+    ON TRIM(UPPER(p.distributor_name)) = sd.distributor
+  WHERE 
+    UPPER(p.sales_order_type) = "GT DIRECT PURCHASE"
+    AND p.sign_off_time IS NOT NULL
+    AND DATE(p.sign_off_time) >= sd.current_stock_date
+),
+
+in_transit_from_lm_shipment AS (
+  SELECT 
+    p.* EXCEPT (shipment_ach_time),
+    CASE 
+      WHEN p.outbound_qty IS NOT NULL AND p.outbound_qty <> 0 THEN p.outbound_qty
+      WHEN p.prepare_qty IS NOT NULL AND p.prepare_qty <> 0 THEN p.prepare_qty
+      WHEN p.delivery_notice_qty IS NOT NULL AND p.delivery_notice_qty <> 0 THEN p.delivery_notice_qty
+      ELSE p.order_qty
+    END AS in_transit_qty,
+    sd.current_stock_date,
+    'in_transit_from_lm_shipment' AS source_table,
+    3 AS source_priority
+  FROM `dms.gt_po_shipment_mtd_mv` p
+  LEFT JOIN stock_date sd
+    ON TRIM(UPPER(p.distributor_name)) = sd.distributor
+  WHERE 
+    UPPER(p.sales_order_type) = "GT DIRECT PURCHASE"
+    AND p.sign_off_time IS NOT NULL
+    AND DATE(p.sign_off_time) >= sd.current_stock_date
+    AND p.order_date >= DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH), MONTH)
+    AND p.order_date < DATE_TRUNC(CURRENT_DATE(), MONTH)
+),
+
+in_transit_from_lm_shipment_all AS (
+  SELECT 
+    p.* EXCEPT (shipment_ach_time, si_qty),
+    CASE 
+      WHEN p.outbound_qty IS NOT NULL AND p.outbound_qty <> 0 THEN p.outbound_qty
+      WHEN p.prepare_qty IS NOT NULL AND p.prepare_qty <> 0 THEN p.prepare_qty
+      WHEN p.delivery_notice_qty IS NOT NULL AND p.delivery_notice_qty <> 0 THEN p.delivery_notice_qty
+      ELSE p.order_qty
+    END AS in_transit_qty,
+    sd.current_stock_date,
+    'in_transit_from_lm_shipment_all' AS source_table,
+    4 AS source_priority
+  FROM `dms.gt_po_shipment_all_mv` p
+  LEFT JOIN stock_date sd
+    ON TRIM(UPPER(p.distributor_name)) = sd.distributor
+  WHERE 
+    UPPER(p.sales_order_type) = "GT DIRECT PURCHASE"
+    AND p.sign_off_time IS NOT NULL
+    AND DATE(p.sign_off_time) >= sd.current_stock_date
+    AND p.order_date >= DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH), MONTH)
+    AND p.order_date < DATE_TRUNC(CURRENT_DATE(), MONTH)
+),
+
+in_transit_from_lm_tracking_all AS (
+  SELECT 
+    p.*,
+    CASE 
+      WHEN p.outbound_qty IS NOT NULL AND p.outbound_qty <> 0 THEN p.outbound_qty
+      WHEN p.prepare_qty IS NOT NULL AND p.prepare_qty <> 0 THEN p.prepare_qty
+      WHEN p.delivery_notice_qty IS NOT NULL AND p.delivery_notice_qty <> 0 THEN p.delivery_notice_qty
+      ELSE p.order_qty
+    END AS in_transit_qty,
+    sd.current_stock_date,
+    'in_transit_from_lm_tracking_all' AS source_table,
+    5 AS source_priority
+  FROM `dms.gt_po_tracking_all_mv` p
+  LEFT JOIN stock_date sd
+    ON TRIM(UPPER(p.distributor_name)) = sd.distributor
+  WHERE 
+    UPPER(p.sales_order_type) = "GT DIRECT PURCHASE"
+    AND (p.sign_off_time IS NULL
+    OR DATE(p.sign_off_time) >= sd.current_stock_date)
+    AND p.order_date >= DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH), MONTH)
+    AND p.order_date < DATE_TRUNC(CURRENT_DATE(), MONTH)
+),
+
+-- Gabungan semua sumber
+all_in_transit AS (
+  SELECT * FROM in_transit_from_it
+  UNION ALL
+  SELECT * FROM in_transit_from_mtd
+  UNION ALL
+  SELECT * FROM in_transit_from_lm_shipment
+  UNION ALL
+  SELECT * FROM in_transit_from_lm_shipment_all
+  UNION ALL
+  SELECT * FROM in_transit_from_lm_tracking_all
+),
+
+-- Tambahkan ranking untuk deduplikasi
+ranked_data AS (
+  SELECT 
+    a.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY order_no, REGEXP_REPLACE(customer_order_no, r'_RES[0-9]?$', ''), sku
+      ORDER BY source_priority
+    ) AS rn
+  FROM all_in_transit a
+)
+
+-- Ambil hanya baris pertama dari setiap kombinasi unik
+SELECT *
+FROM ranked_data
+WHERE rn = 1
+ORDER BY order_date, customer_order_no;

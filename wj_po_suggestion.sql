@@ -2,7 +2,7 @@
 WITH
   /* ============================================================
     1. MASTER DATA JOIN
-    Distributor × Product (filter distri brand sesuai mapping)
+    Distributor × Product (filter distri brand sesuai mappin
   ============================================================ */
   distri_product AS (
       SELECT
