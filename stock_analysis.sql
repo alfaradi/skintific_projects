@@ -825,13 +825,20 @@ current_woi_calc AS (
   po_npd_mtd AS (
     SELECT
       distributor_name,
+      region,
       sku,
       SUM(order_qty) AS order_qty
     FROM
       dms.gt_po_tracking_mtd_mv
+    WHERE
+      NOT (
+        sku IN ('G2G-262', 'G2G-276', 'G2G-271', 'G2G-272')
+        AND order_date < '2025-11-20' -- Gunakan DATE() untuk BigQuery
+      )
     GROUP BY
       1,
-      2
+      2,
+      3
   ),
 
   po_npd_mtd_region AS (
@@ -840,7 +847,7 @@ current_woi_calc AS (
       sku,
       SUM(order_qty) AS order_qty_region
     FROM
-      dms.gt_po_tracking_mtd_mv
+     po_npd_mtd
     GROUP BY
       1,
       2
